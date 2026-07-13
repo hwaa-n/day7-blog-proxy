@@ -3,16 +3,17 @@
 //
 // 하는 일:
 // 1) 네이버 블로그 RSS를 서버에서 대신 읽어온다 (최신 5개만).
-// 2) 각 글의 title / link / pubDate / thumbnail / tags(최대 5개)를 추출한다.
+// 2) 각 글의 title / link / pubDate / thumbnail을 추출한다.
 //    - 썸네일: RSS 본문 첫 이미지 -> 없으면 포스트 페이지의 og:image
-//    - 태그: 포스트 페이지의 article:tag 메타 -> 없으면 본문 안 "#태그" 링크 텍스트
 // 3) 이미지 주소는 우리 서버의 /api/image-proxy 를 거치도록 감싸서 반환한다.
 //    (네이버 이미지 서버가 다른 도메인에서의 직접 요청을 막는 경우가 있어서)
+//
+// 참고: 해시태그는 네이버 블로그가 자바스크립트로 나중에 그려주는 영역이라
+// 서버가 원본 HTML만 받아오는 이 방식으로는 가져올 수 없어서 제외했다.
 
 const BLOG_ID = "paintday7";
 const RSS_URL = `https://rss.blog.naver.com/${BLOG_ID}.xml`;
 const MAX_ITEMS = 5; // 최신 5개까지만 노출
-const MAX_TAGS = 5;
 
 export default async function handler(req, res) {
   try {
@@ -38,19 +39,8 @@ export default async function handler(req, res) {
         const description = pickTag(block, "description");
 
         let thumbnail = firstImgSrc(description);
-        let tags = [];
-
-        if (link) {
-          const meta = await fetchPostMeta(link);
-          if (!thumbnail) thumbnail = meta.ogImage;
-          tags = meta.tags;
-        }
-
-        // 태그를 하나도 못 찾았을 때만 RSS 카테고리로 대체
-        if (tags.length === 0) {
-          tags = [...block.matchAll(/<category>([\s\S]*?)<\/category>/g)]
-            .map((m) => decodeEntities(stripCdata(m[1])))
-            .filter((t) => t.length > 0);
+        if (!thumbnail && link) {
+          thumbnail = await fetchOgImage(link);
         }
 
         const proxiedThumbnail = thumbnail
@@ -62,7 +52,6 @@ export default async function handler(req, res) {
           link,
           pubDate,
           year: pubDate ? new Date(pubDate).getFullYear() : null,
-          tags: tags.slice(0, MAX_TAGS),
           thumbnail: proxiedThumbnail,
         };
       })
@@ -100,71 +89,15 @@ function firstImgSrc(html) {
   return m ? m[1].replace(/&amp;/g, "&") : null;
 }
 
-async function fetchPostMeta(url) {
+async function fetchOgImage(url) {
   try {
-    const outerHtml = await fetchHtml(url);
-    const ogImage = extractOgImage(outerHtml);
-
-    // 데스크톱 페이지(blog.naver.com)는 본문이 iframe 안에 있어 태그를 못 찾는 경우가 많다.
-    // 모바일 페이지(m.blog.naver.com)는 본문이 그대로 내려오므로 여기서 태그를 찾는다.
-    let tags = [];
-    const mobileUrl = toMobileUrl(url);
-    if (mobileUrl) {
-      const mobileHtml = await fetchHtml(mobileUrl);
-      tags = extractArticleTags(mobileHtml);
-      if (tags.length === 0) tags = extractHashtagLinks(mobileHtml);
-    }
-
-    // 그래도 못 찾았으면 원래 페이지에서 한 번 더 시도 (안전망)
-    if (tags.length === 0) {
-      tags = extractArticleTags(outerHtml);
-      if (tags.length === 0) tags = extractHashtagLinks(outerHtml);
-    }
-
-    return { ogImage, tags };
-  } catch {
-    return { ogImage: null, tags: [] };
-  }
-}
-
-function toMobileUrl(url) {
-  try {
-    const u = new URL(url);
-    return `https://m.blog.naver.com${u.pathname}`;
+    const r = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; blog-sync-bot/1.0)" },
+    });
+    const html = await r.text();
+    const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+    return m ? m[1] : null;
   } catch {
     return null;
   }
-}
-
-function fetchHtml(url) {
-  return fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; blog-sync-bot/1.0)",
-      Referer: "https://blog.naver.com/",
-    },
-  }).then((r) => r.text());
-}
-
-function extractOgImage(html) {
-  const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
-  return m ? m[1] : null;
-}
-
-function extractArticleTags(html) {
-  return [...html.matchAll(
-    /<meta[^>]+property=["']article:tag["'][^>]+content=["']([^"']+)["']/gi
-  )]
-    .map((m) => decodeEntities(m[1].trim()))
-    .filter((t) => t.length > 0);
-}
-
-function extractHashtagLinks(html) {
-  const seen = new Set();
-  return [...html.matchAll(/>#([^<#]{1,30})<\/a>/g)]
-    .map((m) => decodeEntities(m[1].trim()))
-    .filter((t) => {
-      if (!t || seen.has(t)) return false;
-      seen.add(t);
-      return true;
-    });
 }
