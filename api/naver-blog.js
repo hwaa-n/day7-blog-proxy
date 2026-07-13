@@ -103,24 +103,22 @@ function firstImgSrc(html) {
 async function fetchPostMeta(url) {
   try {
     const outerHtml = await fetchHtml(url);
-
     const ogImage = extractOgImage(outerHtml);
-    let tags = extractArticleTags(outerHtml);
-    if (tags.length === 0) tags = extractHashtagLinks(outerHtml);
 
-    // 겉 페이지(blog.naver.com/.../글번호)에는 대표이미지 메타만 있고
-    // 실제 태그는 <iframe id="mainFrame">로 불러오는 안쪽 본문에 있는 경우가 많다.
-    // 겉에서 못 찾았으면 그 iframe 주소를 따라 들어가서 한 번 더 시도한다.
+    // 데스크톱 페이지(blog.naver.com)는 본문이 iframe 안에 있어 태그를 못 찾는 경우가 많다.
+    // 모바일 페이지(m.blog.naver.com)는 본문이 그대로 내려오므로 여기서 태그를 찾는다.
+    let tags = [];
+    const mobileUrl = toMobileUrl(url);
+    if (mobileUrl) {
+      const mobileHtml = await fetchHtml(mobileUrl);
+      tags = extractArticleTags(mobileHtml);
+      if (tags.length === 0) tags = extractHashtagLinks(mobileHtml);
+    }
+
+    // 그래도 못 찾았으면 원래 페이지에서 한 번 더 시도 (안전망)
     if (tags.length === 0) {
-      const iframeSrc = extractMainFrameSrc(outerHtml);
-      if (iframeSrc) {
-        const iframeUrl = iframeSrc.startsWith("http")
-          ? iframeSrc
-          : `https://blog.naver.com${iframeSrc}`;
-        const innerHtml = await fetchHtml(iframeUrl);
-        tags = extractArticleTags(innerHtml);
-        if (tags.length === 0) tags = extractHashtagLinks(innerHtml);
-      }
+      tags = extractArticleTags(outerHtml);
+      if (tags.length === 0) tags = extractHashtagLinks(outerHtml);
     }
 
     return { ogImage, tags };
@@ -129,14 +127,22 @@ async function fetchPostMeta(url) {
   }
 }
 
-async function fetchHtml(url) {
-  const r = await fetch(url, {
+function toMobileUrl(url) {
+  try {
+    const u = new URL(url);
+    return `https://m.blog.naver.com${u.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+function fetchHtml(url) {
+  return fetch(url, {
     headers: {
       "User-Agent": "Mozilla/5.0 (compatible; blog-sync-bot/1.0)",
       Referer: "https://blog.naver.com/",
     },
-  });
-  return r.text();
+  }).then((r) => r.text());
 }
 
 function extractOgImage(html) {
@@ -161,9 +167,4 @@ function extractHashtagLinks(html) {
       seen.add(t);
       return true;
     });
-}
-
-function extractMainFrameSrc(html) {
-  const m = html.match(/<iframe[^>]+id=["']mainFrame["'][^>]+src=["']([^"']+)["']/i);
-  return m ? m[1] : null;
 }
