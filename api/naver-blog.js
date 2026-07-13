@@ -102,36 +102,68 @@ function firstImgSrc(html) {
 
 async function fetchPostMeta(url) {
   try {
-    const r = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; blog-sync-bot/1.0)" },
-    });
-    const html = await r.text();
+    const outerHtml = await fetchHtml(url);
 
-    const ogMatch = html.match(
-      /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i
-    );
-    const ogImage = ogMatch ? ogMatch[1] : null;
+    const ogImage = extractOgImage(outerHtml);
+    let tags = extractArticleTags(outerHtml);
+    if (tags.length === 0) tags = extractHashtagLinks(outerHtml);
 
-    let tags = [...html.matchAll(
-      /<meta[^>]+property=["']article:tag["'][^>]+content=["']([^"']+)["']/gi
-    )]
-      .map((m) => decodeEntities(m[1].trim()))
-      .filter((t) => t.length > 0);
-
+    // 겉 페이지(blog.naver.com/.../글번호)에는 대표이미지 메타만 있고
+    // 실제 태그는 <iframe id="mainFrame">로 불러오는 안쪽 본문에 있는 경우가 많다.
+    // 겉에서 못 찾았으면 그 iframe 주소를 따라 들어가서 한 번 더 시도한다.
     if (tags.length === 0) {
-      // 백업: 본문 안에서 "#태그명" 형태로 표시된 링크 텍스트를 직접 수집
-      const seen = new Set();
-      tags = [...html.matchAll(/>#([^<#]{1,30})<\/a>/g)]
-        .map((m) => decodeEntities(m[1].trim()))
-        .filter((t) => {
-          if (seen.has(t)) return false;
-          seen.add(t);
-          return true;
-        });
+      const iframeSrc = extractMainFrameSrc(outerHtml);
+      if (iframeSrc) {
+        const iframeUrl = iframeSrc.startsWith("http")
+          ? iframeSrc
+          : `https://blog.naver.com${iframeSrc}`;
+        const innerHtml = await fetchHtml(iframeUrl);
+        tags = extractArticleTags(innerHtml);
+        if (tags.length === 0) tags = extractHashtagLinks(innerHtml);
+      }
     }
 
     return { ogImage, tags };
   } catch {
     return { ogImage: null, tags: [] };
   }
+}
+
+async function fetchHtml(url) {
+  const r = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; blog-sync-bot/1.0)",
+      Referer: "https://blog.naver.com/",
+    },
+  });
+  return r.text();
+}
+
+function extractOgImage(html) {
+  const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+  return m ? m[1] : null;
+}
+
+function extractArticleTags(html) {
+  return [...html.matchAll(
+    /<meta[^>]+property=["']article:tag["'][^>]+content=["']([^"']+)["']/gi
+  )]
+    .map((m) => decodeEntities(m[1].trim()))
+    .filter((t) => t.length > 0);
+}
+
+function extractHashtagLinks(html) {
+  const seen = new Set();
+  return [...html.matchAll(/>#([^<#]{1,30})<\/a>/g)]
+    .map((m) => decodeEntities(m[1].trim()))
+    .filter((t) => {
+      if (!t || seen.has(t)) return false;
+      seen.add(t);
+      return true;
+    });
+}
+
+function extractMainFrameSrc(html) {
+  const m = html.match(/<iframe[^>]+id=["']mainFrame["'][^>]+src=["']([^"']+)["']/i);
+  return m ? m[1] : null;
 }
